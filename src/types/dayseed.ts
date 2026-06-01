@@ -5,6 +5,8 @@ export type Task = {
   title: string;
   categoryIds: string[];
   estimatedPomodoros?: number;
+  scheduledDate?: string;
+  notes?: string;
   status: "active" | "archived";
   createdAt: string;
   archivedAt?: string;
@@ -61,12 +63,25 @@ export type ActiveTimer = {
 
 export type GardenViewMode = "today" | "week" | "month" | "year";
 
+export type UserProfile = {
+  displayName: string;
+  avatarColor: string;
+  avatarDataUrl?: string;
+};
+
+export type DailyGoalSettings = {
+  defaultGoal: number;
+  overrides: Record<string, number>;
+};
+
 export type DayseedSnapshot = {
   tasks: Task[];
   categories: Category[];
   sessions: PomodoroSession[];
   dailyPlants: DailyPlant[];
   fruits: TomatoFruit[];
+  userProfile: UserProfile;
+  dailyGoals: DailyGoalSettings;
   activeTimer?: ActiveTimer;
   selectedTaskId?: string;
   selectedCategoryId?: string;

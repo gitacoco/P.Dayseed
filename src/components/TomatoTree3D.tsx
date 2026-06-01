@@ -27,10 +27,12 @@ type DragState = {
 } | null;
 
 type TomatoTree3DProps = {
+  active?: boolean;
   categories: Category[];
   fruits: TomatoFruit[];
   highlightedCategoryId?: string;
   onMoveFruitAnchor?: (fruitId: string, anchorIndex: number) => void;
+  progress?: number;
   seed?: number;
 };
 
@@ -334,12 +336,122 @@ function SceneCamera() {
   return null;
 }
 
+function WildAir({ active, seed }: { active: boolean; seed: number }) {
+  const group = useRef<THREE.Group>(null);
+  const motes = useMemo(
+    () =>
+      Array.from({ length: 34 }, (_, index) => {
+        const angle = seed * 0.001 + index * 1.87;
+        const radius = 0.55 + (index % 7) * 0.08;
+
+        return {
+          position: [
+            Math.cos(angle) * radius,
+            -0.2 + (index % 11) * 0.18,
+            Math.sin(angle) * radius * 0.36,
+          ] as Vec3,
+          scale: 0.006 + (index % 4) * 0.002,
+        };
+      }),
+    [seed],
+  );
+
+  useFrame(({ clock }) => {
+    if (!group.current) {
+      return;
+    }
+
+    group.current.rotation.y = Math.sin(clock.elapsedTime * 0.15 + seed) * 0.28;
+    group.current.position.y = Math.sin(clock.elapsedTime * 0.5) * 0.03;
+  });
+
+  if (!active) {
+    return null;
+  }
+
+  return (
+    <group ref={group}>
+      {motes.map((mote, index) => (
+        <mesh key={index} position={mote.position}>
+          <sphereGeometry args={[mote.scale, 8, 6]} />
+          <meshBasicMaterial color="#f2cf6f" opacity={0.26} transparent />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function GrowingShoot({ active, progress, seed }: { active: boolean; progress: number; seed: number }) {
+  const group = useRef<THREE.Group>(null);
+  const tipMaterial = useRef<THREE.MeshBasicMaterial>(null);
+  const base = useMemo(() => vinePoint(0.76, seed), [seed]);
+  const shootPoints = useMemo<Vec3[]>(
+    () => {
+      const mid = vinePoint(0.9, seed);
+      const tip = vinePoint(1, seed);
+
+      return [
+        [0, 0, 0],
+        [mid[0] - base[0] + 0.07, mid[1] - base[1] + 0.08, mid[2] - base[2] + 0.012],
+        [tip[0] - base[0] + 0.17, tip[1] - base[1] + 0.36, tip[2] - base[2] + 0.018],
+      ];
+    },
+    [base, seed],
+  );
+
+  useFrame(({ clock }) => {
+    if (!group.current) {
+      return;
+    }
+
+    const pulse = (Math.sin(clock.elapsedTime * 1.8 + seed) + 1) / 2;
+    const visibleGrowth = 0.54 + Math.max(progress, 0.08) * 0.3 + pulse * 0.36;
+    group.current.scale.set(0.86 + pulse * 0.08, visibleGrowth, 0.86 + pulse * 0.08);
+    group.current.rotation.z = Math.sin(clock.elapsedTime * 0.82 + seed) * 0.075;
+
+    if (tipMaterial.current) {
+      tipMaterial.current.opacity = 0.46 + pulse * 0.36;
+    }
+  });
+
+  if (!active) {
+    return null;
+  }
+
+  return (
+    <group position={base} ref={group}>
+      <VineTube color="#7fb96a" opacity={0.96} points={shootPoints} radius={0.014} />
+      <Leaflet
+        position={[shootPoints[1][0] - 0.08, shootPoints[1][1] + 0.05, shootPoints[1][2] + 0.03]}
+        rotation={[0.55, -0.3, -0.8]}
+        scale={0.88}
+      />
+      <Leaflet
+        position={[shootPoints[1][0] + 0.09, shootPoints[1][1] + 0.13, shootPoints[1][2] - 0.025]}
+        rotation={[0.62, 0.34, 0.82]}
+        scale={0.8}
+      />
+      <Leaflet
+        position={[shootPoints[2][0] - 0.04, shootPoints[2][1] - 0.08, shootPoints[2][2] + 0.018]}
+        rotation={[0.5, -0.16, -0.42]}
+        scale={0.56}
+      />
+      <mesh position={shootPoints[2]}>
+        <sphereGeometry args={[0.058, 16, 12]} />
+        <meshBasicMaterial color="#d9f0b9" opacity={0.58} ref={tipMaterial} transparent />
+      </mesh>
+    </group>
+  );
+}
+
 function TreeScene({
+  active = false,
   categories,
   commitDrag,
   dragging,
   fruits,
   highlightedCategoryId,
+  progress = 0,
   rotationY,
   seed,
   setDragging,
@@ -417,6 +529,7 @@ function TreeScene({
 
     group.current.rotation.y = rotationY + Math.sin(clock.elapsedTime * 0.4) * 0.035;
     group.current.rotation.z = Math.sin(clock.elapsedTime * 0.7 + resolvedSeed) * 0.01;
+    group.current.scale.setScalar(0.72 + (active ? progress * 0.045 + Math.sin(clock.elapsedTime * 0.9) * 0.006 : 0));
   });
 
   const handlePointerMove = (event: ThreeEvent<PointerEvent>) => {
@@ -470,6 +583,7 @@ function TreeScene({
       <ambientLight intensity={1.28} />
       <directionalLight intensity={1.45} position={[2.4, 4.8, 3.6]} />
       <directionalLight intensity={0.52} position={[-3.4, 2.4, -2.2]} />
+      <WildAir active={active} seed={resolvedSeed} />
       <group
         onPointerCancel={handlePointerUp}
         onPointerMove={handlePointerMove}
@@ -477,7 +591,6 @@ function TreeScene({
         position={[0, -0.68, 0]}
         ref={group}
         rotation={[0.08, 0, 0]}
-        scale={0.72}
       >
         <mesh position={[0, -0.28, 0]} rotation={[-Math.PI / 2, 0, 0]} scale={[0.8, 0.5, 1]}>
           <circleGeometry args={[0.42, 34]} />
@@ -512,6 +625,7 @@ function TreeScene({
             side={leaf.side}
           />
         ))}
+        <GrowingShoot active={active} progress={progress} seed={resolvedSeed} />
         {slots.map((slot) => (
           <SlotMarker
             active={dragging?.snapAnchorIndex === slot.index}
@@ -586,7 +700,7 @@ export function TomatoTree3D(props: TomatoTree3DProps) {
   return (
     <div
       aria-label={`3D tomato vine with ${props.fruits.length} tomatoes`}
-      className="tomato-tree-3d"
+      className={`tomato-tree-3d ${props.active ? "is-active-session" : ""}`}
       role="img"
     >
       <Canvas
@@ -595,7 +709,6 @@ export function TomatoTree3D(props: TomatoTree3DProps) {
         dpr={[1, 2]}
         gl={{ alpha: true, antialias: true }}
       >
-        <color args={["#eeece7"]} attach="background" />
         <TreeScene
           {...props}
           commitDrag={commitDrag}

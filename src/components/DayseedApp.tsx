@@ -4,32 +4,39 @@ import {
   CalendarDays,
   ChevronDown,
   ChevronRight,
-  Check,
+  Image as ImageIcon,
   Inbox,
   Leaf,
   ListChecks,
+  Minus,
   MoreVertical,
+  PanelLeftClose,
   Pause,
   Play,
   Plus,
   SlidersHorizontal,
   Sprout,
   Square,
+  Upload,
   Volume2,
+  VolumeX,
 } from "lucide-react";
-import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useState } from "react";
-import { endOfMonth, endOfWeek, format, isWithinInterval, parseISO, startOfMonth, startOfWeek } from "date-fns";
+import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { endOfMonth, endOfWeek, format, isSameDay, isWithinInterval, parseISO, startOfMonth, startOfWeek } from "date-fns";
 import { GardenCanvas } from "@/components/GardenCanvas";
 import { TomatoTree3D } from "@/components/TomatoTree3D";
-import { dateKey, monthTitle, sameMonth, sameYear, yearTitle } from "@/lib/dates";
+import { dateKey, monthTitle, yearTitle } from "@/lib/dates";
 import { formatRemaining, remainingSeconds } from "@/lib/timer";
-import { useDayseedStore } from "@/store/dayseedStore";
+import { useDayseedStore, type TaskInput } from "@/store/dayseedStore";
 import type {
   Category,
+  DailyGoalSettings,
+  DailyPlant,
   GardenViewMode,
   PomodoroSession,
   Task,
   TomatoFruit,
+  UserProfile,
 } from "@/types/dayseed";
 
 type AppSection = "tasks" | "yard";
@@ -50,6 +57,36 @@ const YARD_SCALES: { id: YardScale; label: string; viewMode: GardenViewMode }[] 
   { id: "week", label: "This week", viewMode: "week" },
 ];
 
+const AVATAR_COLORS = ["#003c33", "#6f8c62", "#d84d32", "#7a4b77", "#2f5f88"];
+
+function firstInitial(name: string) {
+  return name.trim().charAt(0).toUpperCase() || "N";
+}
+
+function TomatoMark({
+  color,
+  empty = false,
+  small = false,
+  striped = false,
+}: {
+  color: string;
+  empty?: boolean;
+  small?: boolean;
+  striped?: boolean;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`tomato-mark ${empty ? "is-empty" : ""} ${small ? "is-small" : ""} ${striped ? "is-striped" : ""}`}
+      style={{ "--swatch": color } as React.CSSProperties}
+    />
+  );
+}
+
+function goalForDate(settings: DailyGoalSettings, date: string) {
+  return settings.overrides[date] ?? settings.defaultGoal;
+}
+
 function useClock(activeTimerId?: string) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -61,13 +98,120 @@ function useClock(activeTimerId?: string) {
   return now;
 }
 
+let whiteNoiseAudio: {
+  context: AudioContext;
+  source: AudioBufferSourceNode;
+  gain: GainNode;
+} | null = null;
+
+function stopWhiteNoise() {
+  try {
+    whiteNoiseAudio?.source.stop();
+  } catch {
+    // The node may already be stopped by the browser.
+  }
+  void whiteNoiseAudio?.context.close();
+  whiteNoiseAudio = null;
+}
+
+function startWhiteNoise() {
+  if (whiteNoiseAudio) {
+    return true;
+  }
+
+  const AudioContextConstructor =
+    window.AudioContext ||
+    (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+
+  if (!AudioContextConstructor) {
+    return false;
+  }
+
+  const context = new AudioContextConstructor();
+  const durationSeconds = 2;
+  const buffer = context.createBuffer(2, context.sampleRate * durationSeconds, context.sampleRate);
+
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const data = buffer.getChannelData(channel);
+    for (let index = 0; index < data.length; index += 1) {
+      data[index] = Math.random() * 2 - 1;
+    }
+  }
+
+  const source = context.createBufferSource();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+
+  source.buffer = buffer;
+  source.loop = true;
+  filter.type = "lowpass";
+  filter.frequency.value = 2200;
+  gain.gain.value = 0.045;
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(context.destination);
+  source.start();
+  whiteNoiseAudio = { context, gain, source };
+
+  return true;
+}
+
+function WhiteNoiseButton({ compact = false }: { compact?: boolean }) {
+  const playing = useDayseedStore((state) => state.whiteNoisePlaying);
+  const setWhiteNoisePlaying = useDayseedStore((state) => state.setWhiteNoisePlaying);
+  const toggleNoise = () => {
+    if (playing) {
+      stopWhiteNoise();
+      setWhiteNoisePlaying(false);
+      return;
+    }
+
+    setWhiteNoisePlaying(startWhiteNoise());
+  };
+
+  return (
+    <button
+      aria-label="White Noise"
+      className={`white-noise-button ${compact ? "is-compact" : ""} ${playing ? "is-active" : ""}`}
+      onClick={toggleNoise}
+      type="button"
+    >
+      {playing ? <VolumeX size={18} /> : <Volume2 size={18} />}
+      <span>White Noise</span>
+    </button>
+  );
+}
+
 function AppHeader({
   section,
   setSection,
+  userProfile,
+  updateUserProfile,
 }: {
   section: AppSection;
   setSection: (section: AppSection) => void;
+  userProfile: UserProfile;
+  updateUserProfile: (patch: Partial<UserProfile>) => void;
 }) {
+  const avatarStyle = { "--avatar": userProfile.avatarColor } as React.CSSProperties;
+  const whiteNoisePlaying = useDayseedStore((state) => state.whiteNoisePlaying);
+  const avatarImageStyle = userProfile.avatarDataUrl
+    ? ({
+        ...avatarStyle,
+        backgroundImage: `url(${userProfile.avatarDataUrl})`,
+      } as React.CSSProperties)
+    : avatarStyle;
+
+  const uploadAvatar = (file?: File) => {
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => updateUserProfile({ avatarDataUrl: String(reader.result) });
+    reader.readAsDataURL(file);
+  };
+
   return (
     <header className="app-header">
       <button className="wordmark" onClick={() => setSection("tasks")} type="button">
@@ -90,10 +234,59 @@ function AppHeader({
           Yard
         </button>
       </nav>
-      <div className="profile-chip" aria-label="Current user">
-        <span>N</span>
-        <strong>Nora</strong>
-        <ChevronDown size={18} strokeWidth={1.7} />
+      <div className="header-actions">
+        {whiteNoisePlaying ? <WhiteNoiseButton compact /> : null}
+        <details className="profile-menu">
+          <summary className="profile-chip" aria-label="Current user">
+            <span style={avatarImageStyle}>{userProfile.avatarDataUrl ? null : firstInitial(userProfile.displayName)}</span>
+            <strong>{userProfile.displayName}</strong>
+            <ChevronDown size={18} strokeWidth={1.7} />
+          </summary>
+          <div className="profile-popover">
+            <label className="field-label">
+              <span>Name</span>
+              <input
+                aria-label="User name"
+                onChange={(event) => updateUserProfile({ displayName: event.target.value })}
+                value={userProfile.displayName}
+              />
+            </label>
+            <div className="avatar-editor">
+              <div className="avatar-preview" style={avatarImageStyle}>
+                {userProfile.avatarDataUrl ? null : firstInitial(userProfile.displayName)}
+              </div>
+              <label className="quiet-action">
+                <Upload size={15} />
+                <span>Upload</span>
+                <input
+                  accept="image/*"
+                  onChange={(event) => uploadAvatar(event.target.files?.[0])}
+                  type="file"
+                />
+              </label>
+              <button
+                className="quiet-action"
+                onClick={() => updateUserProfile({ avatarDataUrl: undefined })}
+                type="button"
+              >
+                <ImageIcon size={15} />
+                <span>Initial</span>
+              </button>
+            </div>
+            <div className="avatar-colors" aria-label="Avatar color">
+              {AVATAR_COLORS.map((color) => (
+                <button
+                  aria-label={`Use avatar color ${color}`}
+                  className={userProfile.avatarColor === color ? "is-active" : ""}
+                  key={color}
+                  onClick={() => updateUserProfile({ avatarColor: color })}
+                  style={{ "--avatar": color } as React.CSSProperties}
+                  type="button"
+                />
+              ))}
+            </div>
+          </div>
+        </details>
       </div>
     </header>
   );
@@ -153,13 +346,14 @@ function TomatoTrail({
           fruit ? categoryMap.get(fruit.categoryId) : categoryMap.get(task.categoryIds[index % task.categoryIds.length]);
         const color = category?.color ?? fallbackCategory?.color ?? "#d84d32";
         const isActual = Boolean(fruit);
-        const isEstimated = !isActual && index < estimate;
 
         return (
-          <span
-            className={`tomato-dot ${isActual ? "is-grown" : isEstimated ? "is-estimate" : "is-empty"}`}
+          <TomatoMark
+            color={color}
+            empty={!isActual}
             key={`${task.id}-${index}`}
-            style={{ "--swatch": color } as React.CSSProperties}
+            small={compact}
+            striped={fruit?.variant === "striped" || category?.tomatoVariant === "striped"}
           />
         );
       })}
@@ -197,30 +391,123 @@ function TaskFilterRail({
 
 function TaskComposer({
   selectedCategoryId,
+  activeFilter,
+  categories,
   addTask,
 }: {
   selectedCategoryId?: string;
-  addTask: (title: string, categoryIds: string[]) => void;
+  activeFilter: TaskFilter;
+  categories: Category[];
+  addTask: (input: TaskInput) => void;
 }) {
   const [title, setTitle] = useState("");
+  const [scheduledDate, setScheduledDate] = useState(activeFilter === "today" ? dateKey() : "");
+  const [categoryId, setCategoryId] = useState(selectedCategoryId ?? categories[0]?.id ?? "");
+  const [estimate, setEstimate] = useState(1);
+  const [notes, setNotes] = useState("");
+  const [expanded, setExpanded] = useState(false);
 
   const submitTask = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    addTask(title, selectedCategoryId ? [selectedCategoryId] : []);
+    addTask({
+      categoryIds: categoryId ? [categoryId] : [],
+      estimatedPomodoros: estimate,
+      notes,
+      scheduledDate,
+      title,
+    });
     setTitle("");
+    setNotes("");
+    setEstimate(1);
+    setScheduledDate(activeFilter === "today" ? dateKey() : "");
+    setExpanded(false);
   };
+  const handleTitleSubmit = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  };
+  const selectedCategory = categories.find((category) => category.id === categoryId) ?? categories[0];
 
   return (
-    <form className="task-composer" onSubmit={submitTask}>
-      <button aria-label="Add task" className="composer-plus" type="submit">
-        <Plus size={24} strokeWidth={1.5} />
-      </button>
-      <input
-        aria-label="Task title"
-        onChange={(event) => setTitle(event.target.value)}
-        placeholder="New task"
-        value={title}
-      />
+    <form
+      className={`task-composer ${expanded || title || notes ? "is-expanded" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setExpanded(Boolean(title || notes));
+        }
+      }}
+      onFocus={() => setExpanded(true)}
+      onSubmit={submitTask}
+    >
+      <div className="composer-main">
+        <button aria-label="Add task" className="composer-plus" type="submit">
+          <Plus size={24} strokeWidth={1.5} />
+        </button>
+        <input
+          aria-label="Task title"
+          onChange={(event) => setTitle(event.target.value)}
+          onKeyDown={handleTitleSubmit}
+          placeholder={`Add a task${activeFilter === "today" ? " to Today" : ""}, press Enter to save`}
+          value={title}
+        />
+        <div className="composer-estimate" aria-label="Estimated tomatoes">
+          <button aria-label="Decrease estimate" onClick={() => setEstimate((value) => Math.max(0, value - 1))} type="button">
+            <Minus size={14} />
+          </button>
+          <span>
+            {Array.from({ length: Math.min(estimate, 5) }, (_, index) => (
+              <TomatoMark
+                color={selectedCategory?.color ?? "#d84d32"}
+                key={index}
+                small
+                striped={selectedCategory?.tomatoVariant === "striped"}
+              />
+            ))}
+            {estimate > 5 ? <small>+{estimate - 5}</small> : null}
+          </span>
+          <button aria-label="Increase estimate" onClick={() => setEstimate((value) => Math.min(12, value + 1))} type="button">
+            <Plus size={14} />
+          </button>
+        </div>
+        <label className="composer-date">
+          <CalendarDays size={16} />
+          <input
+            aria-label="Task date"
+            onChange={(event) => setScheduledDate(event.target.value)}
+            type="date"
+            value={scheduledDate}
+          />
+        </label>
+      </div>
+      <div className="composer-details">
+        <label className="field-label">
+          <span>Category</span>
+          <select
+            aria-label="Task category"
+            onChange={(event) => setCategoryId(event.target.value)}
+            value={categoryId}
+          >
+            {categories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field-label composer-notes">
+          <span>Notes</span>
+          <input
+            aria-label="Task notes"
+            onChange={(event) => setNotes(event.target.value)}
+            placeholder="Optional context"
+            value={notes}
+          />
+        </label>
+      </div>
     </form>
   );
 }
@@ -243,7 +530,7 @@ function TaskRow({
   selectTask: (taskId: string) => void;
   editTask: (
     taskId: string,
-    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros">>,
+    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros" | "scheduledDate" | "notes">>,
   ) => void;
   archiveTask: (taskId: string) => void;
 }) {
@@ -305,17 +592,25 @@ function TaskRow({
           value={task.title}
         />
       ) : (
-        <button
-          aria-label={`Select ${task.title}`}
-          className="task-title-button"
-          onDoubleClick={(event) => {
-            event.stopPropagation();
-            enterEditing();
-          }}
-          type="button"
-        >
-          {task.title}
-        </button>
+        <div className="task-title-stack">
+          <button
+            aria-label={`Select ${task.title}`}
+            className="task-title-button"
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              enterEditing();
+            }}
+            type="button"
+          >
+            {task.title}
+          </button>
+          {task.scheduledDate || task.notes ? (
+            <small>
+              {task.scheduledDate ? format(parseISO(task.scheduledDate), "MMM d") : "No date"}
+              {task.notes ? ` · ${task.notes}` : ""}
+            </small>
+          ) : null}
+        </div>
       )}
       <button
         aria-label={`Select ${task.title}`}
@@ -332,7 +627,11 @@ function TaskRow({
           style={{ "--swatch": category.color } as React.CSSProperties}
           type="button"
         >
-          <span />
+          <TomatoMark
+            color={category.color}
+            small
+            striped={category.tomatoVariant === "striped"}
+          />
           {category.name}
         </button>
       ) : null}
@@ -356,6 +655,24 @@ function TaskRow({
           >
             More
           </button>
+          <label>
+            Date
+            <input
+              aria-label={`Date for ${task.title}`}
+              onChange={(event) => editTask(task.id, { scheduledDate: event.target.value })}
+              type="date"
+              value={task.scheduledDate ?? ""}
+            />
+          </label>
+          <label>
+            Notes
+            <textarea
+              aria-label={`Notes for ${task.title}`}
+              onChange={(event) => editTask(task.id, { notes: event.target.value })}
+              placeholder="Optional notes"
+              value={task.notes ?? ""}
+            />
+          </label>
           <button onClick={() => archiveTask(task.id)} type="button">
             Archive
           </button>
@@ -368,6 +685,7 @@ function TaskRow({
 function TaskList({
   title,
   dateLabel,
+  activeFilter,
   tasks,
   categories,
   sessions,
@@ -381,16 +699,17 @@ function TaskList({
 }: {
   title: string;
   dateLabel: string;
+  activeFilter: TaskFilter;
   tasks: Task[];
   categories: Category[];
   sessions: PomodoroSession[];
   fruits: TomatoFruit[];
   selectedTaskId?: string;
   selectedCategoryId?: string;
-  addTask: (title: string, categoryIds: string[]) => void;
+  addTask: (input: TaskInput) => void;
   editTask: (
     taskId: string,
-    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros">>,
+    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros" | "scheduledDate" | "notes">>,
   ) => void;
   archiveTask: (taskId: string) => void;
   selectTask: (taskId: string) => void;
@@ -407,7 +726,10 @@ function TaskList({
         </button>
       </div>
       <TaskComposer
+        activeFilter={activeFilter}
         addTask={addTask}
+        categories={categories}
+        key={activeFilter}
         selectedCategoryId={selectedCategoryId}
       />
       <div className="task-list" aria-label="Tasks">
@@ -434,36 +756,40 @@ function NextTaskPreview({
   nextTask,
   categories,
   fruits,
+  dailyGoals,
   selectedDate,
   plants,
   highlightedCategoryId,
   remaining,
   activeTimer,
   setSelectedCategory,
+  setDailyGoal,
   startTimer,
   pauseTimer,
   resumeTimer,
   abandonTimer,
-  completeActiveTimer,
   moveFruitAnchor,
   expanded = false,
+  gardenCollapsed = false,
 }: {
   nextTask?: Task;
   categories: Category[];
   fruits: TomatoFruit[];
+  dailyGoals: DailyGoalSettings;
   selectedDate: string;
   plants: ReturnType<typeof useDayseedStore.getState>["dailyPlants"];
   highlightedCategoryId?: string;
   remaining: number;
   activeTimer: ReturnType<typeof useDayseedStore.getState>["activeTimer"];
   setSelectedCategory: (categoryId: string) => void;
+  setDailyGoal: (date: string, goal: number, scope: "today" | "future") => void;
   startTimer: () => void;
   pauseTimer: () => void;
   resumeTimer: () => void;
   abandonTimer: () => void;
-  completeActiveTimer: () => void;
   moveFruitAnchor: (fruitId: string, anchorIndex: number) => void;
   expanded?: boolean;
+  gardenCollapsed?: boolean;
 }) {
   const taskCategories = nextTask
     ? categories.filter((category) => nextTask.categoryIds.includes(category.id))
@@ -474,12 +800,18 @@ function NextTaskPreview({
   const dailyFruitIds = new Set(dailyPlant?.fruitIds ?? []);
   const dailyFruits = fruits.filter((fruit) => dailyFruitIds.has(fruit.id));
   const todayEffort = dailyFruits.length;
+  const dailyGoal = goalForDate(dailyGoals, selectedDate);
+  const goalInputRef = useRef<HTMLInputElement>(null);
+  const submitGoal = (scope: "today" | "future") => {
+    setDailyGoal(selectedDate, Number(goalInputRef.current?.value ?? dailyGoal), scope);
+  };
   const timerProgress = activeTimer
     ? Math.max(0, Math.min(1, 1 - remaining / activeTimer.plannedDurationSec))
     : 0.72;
+  const sessionLabel = activeTimer ? (activeTimer.status === "paused" ? "Paused" : "Focusing") : "Next up";
 
   return (
-    <aside className={`next-preview ${expanded ? "is-expanded" : ""}`}>
+    <aside className={`next-preview ${expanded ? "is-expanded" : ""} ${gardenCollapsed ? "is-garden-collapsed" : ""}`}>
       <div className="session-card">
         <div
           className="session-minutes"
@@ -489,11 +821,15 @@ function NextTaskPreview({
           <span>{activeTimer ? "left" : "min"}</span>
         </div>
         <div className="session-copy">
-          <span>Next up</span>
+          <span>{sessionLabel}</span>
           <strong>{nextTask?.title ?? "No task selected"}</strong>
           {nextTask && focusCategory ? (
             <small style={{ "--swatch": focusCategory.color } as React.CSSProperties}>
-              <span />
+              <TomatoMark
+                color={focusCategory.color}
+                small
+                striped={focusCategory.tomatoVariant === "striped"}
+              />
               {focusCategory.name}
             </small>
           ) : null}
@@ -509,9 +845,14 @@ function NextTaskPreview({
             <Play size={20} fill="currentColor" strokeWidth={1.8} />
           </button>
         ) : activeTimer.status === "paused" ? (
-          <button aria-label="Resume" className="round-play" onClick={resumeTimer} type="button">
-            <Play size={20} fill="currentColor" strokeWidth={1.8} />
-          </button>
+          <div className="session-actions">
+            <button aria-label="Resume" className="round-play" onClick={resumeTimer} type="button">
+              <Play size={20} fill="currentColor" strokeWidth={1.8} />
+            </button>
+            <button aria-label="Stop" className="round-stop" onClick={abandonTimer} type="button">
+              <Square size={15} fill="currentColor" strokeWidth={1.8} />
+            </button>
+          </div>
         ) : (
           <button aria-label="Pause" className="round-play" onClick={pauseTimer} type="button">
             <Pause size={20} fill="currentColor" strokeWidth={1.8} />
@@ -519,26 +860,52 @@ function NextTaskPreview({
         )}
       </div>
 
-      <div className="preview-garden">
+      <div className={`preview-garden ${activeTimer ? "is-active-session" : ""}`}>
         <TomatoTree3D
+          active={Boolean(activeTimer)}
           categories={categories}
           fruits={dailyFruits}
           highlightedCategoryId={highlightedCategoryId}
           onMoveFruitAnchor={moveFruitAnchor}
+          progress={timerProgress}
           seed={dailyPlant?.seed}
         />
       </div>
 
       <div className="garden-summary">
-        <span className="summary-tomato" />
+        <TomatoMark color="#d84d32" />
         <div>
           <span>Today&apos;s garden</span>
-          <strong>{todayEffort} / 15 effort</strong>
+          <strong>{todayEffort} / {dailyGoal} effort</strong>
         </div>
-        <ChevronRight size={24} strokeWidth={1.6} />
+        <details className="goal-menu">
+          <summary aria-label="Adjust daily goal">
+            <ChevronRight size={24} strokeWidth={1.6} />
+          </summary>
+          <div className="goal-popover">
+            <label className="field-label">
+              <span>Daily goal</span>
+              <input
+                aria-label="Daily tomato goal"
+                defaultValue={dailyGoal}
+                key={`${selectedDate}-${dailyGoal}`}
+                min={1}
+                max={99}
+                ref={goalInputRef}
+                type="number"
+              />
+            </label>
+            <button onClick={() => submitGoal("today")} type="button">
+              Today only
+            </button>
+            <button onClick={() => submitGoal("future")} type="button">
+              Set for future days
+            </button>
+          </div>
+        </details>
       </div>
 
-      {expanded && nextTask ? (
+      {expanded && nextTask && !activeTimer ? (
         <div className="preview-categories" aria-label="Focus category">
           {(taskCategories.length > 0 ? taskCategories : categories.slice(0, 1)).map((category) => (
             <button
@@ -549,7 +916,11 @@ function NextTaskPreview({
               style={{ "--swatch": category.color } as React.CSSProperties}
               type="button"
             >
-              <span />
+              <TomatoMark
+                color={category.color}
+                small
+                striped={category.tomatoVariant === "striped"}
+              />
               {category.name}
             </button>
           ))}
@@ -557,23 +928,8 @@ function NextTaskPreview({
       ) : null}
 
       {expanded && activeTimer ? (
-        <div className="focus-controls">
-          <button onClick={activeTimer.status === "paused" ? resumeTimer : pauseTimer} type="button">
-            {activeTimer.status === "paused" ? <Play size={18} /> : <Pause size={18} />}
-            <span>{activeTimer.status === "paused" ? "Continue" : "Pause"}</span>
-          </button>
-          <button onClick={abandonTimer} type="button">
-            <Square size={18} />
-            <span>Stop</span>
-          </button>
-          <button onClick={completeActiveTimer} type="button">
-            <Check size={18} />
-            <span>Plant</span>
-          </button>
-          <button type="button">
-            <Volume2 size={18} />
-            <span>Noise</span>
-          </button>
+        <div className="focus-ambient-controls">
+          <WhiteNoiseButton />
         </div>
       ) : null}
     </aside>
@@ -592,6 +948,7 @@ function TasksWorkbench({
   highlightedCategoryId,
   activeTimer,
   remaining,
+  dailyGoals,
   addTask,
   editTask,
   archiveTask,
@@ -601,8 +958,8 @@ function TasksWorkbench({
   pauseTimer,
   resumeTimer,
   abandonTimer,
-  completeActiveTimer,
   moveFruitAnchor,
+  setDailyGoal,
 }: {
   tasks: Task[];
   categories: Category[];
@@ -615,10 +972,11 @@ function TasksWorkbench({
   highlightedCategoryId?: string;
   activeTimer: ReturnType<typeof useDayseedStore.getState>["activeTimer"];
   remaining: number;
-  addTask: (title: string, categoryIds: string[]) => void;
+  dailyGoals: DailyGoalSettings;
+  addTask: (input: TaskInput) => void;
   editTask: (
     taskId: string,
-    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros">>,
+    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros" | "scheduledDate" | "notes">>,
   ) => void;
   archiveTask: (taskId: string) => void;
   selectTask: (taskId: string) => void;
@@ -627,8 +985,8 @@ function TasksWorkbench({
   pauseTimer: () => void;
   resumeTimer: () => void;
   abandonTimer: () => void;
-  completeActiveTimer: () => void;
   moveFruitAnchor: (fruitId: string, anchorIndex: number) => void;
+  setDailyGoal: (date: string, goal: number, scope: "today" | "future") => void;
 }) {
   const [filter, setFilter] = useState<TaskFilter>("today");
   const today = new Date();
@@ -637,25 +995,36 @@ function TasksWorkbench({
   const monthStart = startOfMonth(today);
   const monthEnd = endOfMonth(today);
   const activeTasks = tasks.filter((task) => task.status === "active");
-  const inboxTasks = activeTasks.filter((task) => completedSessionsForTask(sessions, task.id).length === 0);
+  const todayTasks = activeTasks.filter((task) =>
+    task.scheduledDate ? isSameDay(parseISO(task.scheduledDate), today) : false,
+  );
+  const inboxTasks = activeTasks.filter((task) => !task.scheduledDate);
   const weekTasks = activeTasks.filter((task) => {
-    const createdAt = parseISO(task.createdAt);
-    return !Number.isNaN(createdAt.getTime()) && isWithinInterval(createdAt, { start: weekStart, end: weekEnd });
+    if (!task.scheduledDate) {
+      return false;
+    }
+
+    const scheduledAt = parseISO(task.scheduledDate);
+    return !Number.isNaN(scheduledAt.getTime()) && isWithinInterval(scheduledAt, { start: weekStart, end: weekEnd });
   });
   const monthTasks = activeTasks.filter((task) => {
-    const createdAt = parseISO(task.createdAt);
-    return !Number.isNaN(createdAt.getTime()) && isWithinInterval(createdAt, { start: monthStart, end: monthEnd });
+    if (!task.scheduledDate) {
+      return false;
+    }
+
+    const scheduledAt = parseISO(task.scheduledDate);
+    return !Number.isNaN(scheduledAt.getTime()) && isWithinInterval(scheduledAt, { start: monthStart, end: monthEnd });
   });
   const visibleTasks = {
     inbox: inboxTasks,
-    today: activeTasks,
+    today: todayTasks,
     week: weekTasks,
     month: monthTasks,
     all: activeTasks,
   } satisfies Record<TaskFilter, Task[]>;
   const counts = {
     inbox: inboxTasks.length,
-    today: activeTasks.length,
+    today: todayTasks.length,
     week: weekTasks.length,
     month: monthTasks.length,
     all: activeTasks.length,
@@ -671,6 +1040,7 @@ function TasksWorkbench({
       <div className="center-stack">
         <TaskList
           addTask={addTask}
+          activeFilter={filter}
           archiveTask={archiveTask}
           categories={categories}
           dateLabel={dateLabel}
@@ -688,8 +1058,8 @@ function TasksWorkbench({
         abandonTimer={abandonTimer}
         activeTimer={activeTimer}
         categories={categories}
-        completeActiveTimer={completeActiveTimer}
         fruits={fruits}
+        dailyGoals={dailyGoals}
         highlightedCategoryId={highlightedCategoryId}
         moveFruitAnchor={moveFruitAnchor}
         nextTask={nextTask}
@@ -698,6 +1068,7 @@ function TasksWorkbench({
         remaining={remaining}
         resumeTimer={resumeTimer}
         selectedDate={selectedDate}
+        setDailyGoal={setDailyGoal}
         setSelectedCategory={setSelectedCategory}
         startTimer={startTimer}
       />
@@ -705,35 +1076,20 @@ function TasksWorkbench({
   );
 }
 
-function AmbientStats({
-  todayCount,
-  weekCount,
-  monthPlantedDays,
-  yearPlantedDays,
-}: {
-  todayCount: number;
-  weekCount: number;
-  monthPlantedDays: number;
-  yearPlantedDays: number;
-}) {
+type AmbientStat = {
+  label: string;
+  value: string | number;
+};
+
+function AmbientStats({ items }: { items: AmbientStat[] }) {
   return (
     <section className="ambient-stats" aria-label="Garden stats">
-      <div>
-        <strong>{todayCount}</strong>
-        <span>today</span>
-      </div>
-      <div>
-        <strong>{weekCount}</strong>
-        <span>week</span>
-      </div>
-      <div>
-        <strong>{monthPlantedDays}</strong>
-        <span>month days</span>
-      </div>
-      <div>
-        <strong>{yearPlantedDays}</strong>
-        <span>yard days</span>
-      </div>
+      {items.map((item) => (
+        <div key={item.label}>
+          <strong>{item.value}</strong>
+          <span>{item.label}</span>
+        </div>
+      ))}
     </section>
   );
 }
@@ -743,21 +1099,21 @@ function YardWorkspace({
   fruits,
   plants,
   highlightedCategoryId,
+  dailyGoals,
   selectedDate,
   setHighlightedCategory,
   setSelectedDate,
   setViewMode,
-  stats,
 }: {
   categories: Category[];
   fruits: TomatoFruit[];
+  dailyGoals: DailyGoalSettings;
   plants: ReturnType<typeof useDayseedStore.getState>["dailyPlants"];
   highlightedCategoryId?: string;
   selectedDate: string;
   setHighlightedCategory: (categoryId?: string) => void;
   setSelectedDate: (date: string, viewMode?: GardenViewMode) => void;
   setViewMode: (viewMode: GardenViewMode) => void;
-  stats: React.ComponentProps<typeof AmbientStats>;
 }) {
   const [scale, setScale] = useState<YardScale>("year");
   const viewMode = YARD_SCALES.find((item) => item.id === scale)?.viewMode ?? "year";
@@ -773,6 +1129,106 @@ function YardWorkspace({
     setScale(nextScale);
     setViewMode(nextView);
   };
+  const stats = useMemo(() => {
+    const selected = parseISO(selectedDate);
+    const categoryMap = categoriesById(categories);
+
+    const fruitsForPlants = (scopePlants: DailyPlant[]) => {
+      const fruitIds = new Set(scopePlants.flatMap((plant) => plant.fruitIds));
+      return fruits.filter((fruit) => fruitIds.has(fruit.id));
+    };
+    const plantsInRange = (start: Date, end: Date) =>
+      plants.filter((plant) => {
+        if (plant.fruitIds.length === 0) {
+          return false;
+        }
+
+        const plantedAt = parseISO(plant.date);
+        return !Number.isNaN(plantedAt.getTime()) && isWithinInterval(plantedAt, { start, end });
+      });
+    const targetInRange = (start: Date, end: Date) => {
+      let total = 0;
+      const cursor = new Date(start);
+
+      while (cursor <= end) {
+        total += goalForDate(dailyGoals, dateKey(cursor));
+        cursor.setDate(cursor.getDate() + 1);
+      }
+
+      return total;
+    };
+    const topCategory = (scopeFruits: TomatoFruit[]) => {
+      const counts = new Map<string, number>();
+
+      scopeFruits.forEach((fruit) => {
+        counts.set(fruit.categoryId, (counts.get(fruit.categoryId) ?? 0) + 1);
+      });
+
+      const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+      return top ? categoryMap.get(top[0])?.name ?? "Mixed" : "None";
+    };
+    const bestDay = (scopePlants: DailyPlant[]) => {
+      const best = [...scopePlants].sort((a, b) => b.fruitIds.length - a.fruitIds.length)[0];
+      return best ? `${format(parseISO(best.date), "MMM d")} · ${best.fruitIds.length}` : "None";
+    };
+    const bestMonth = () => {
+      const monthCounts = new Map<string, number>();
+
+      plants.forEach((plant) => {
+        const plantedAt = parseISO(plant.date);
+        if (plantedAt.getFullYear() !== selected.getFullYear() || plant.fruitIds.length === 0) {
+          return;
+        }
+
+        const key = format(plantedAt, "MMM");
+        monthCounts.set(key, (monthCounts.get(key) ?? 0) + plant.fruitIds.length);
+      });
+
+      const top = [...monthCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+      return top ? `${top[0]} · ${top[1]}` : "None";
+    };
+
+    if (viewMode === "week") {
+      const start = startOfWeek(selected, { weekStartsOn: 1 });
+      const end = endOfWeek(selected, { weekStartsOn: 1 });
+      const scopePlants = plantsInRange(start, end);
+      const scopeFruits = fruitsForPlants(scopePlants);
+      const selectedPlant = plants.find((plant) => plant.date === selectedDate);
+
+      return [
+        { label: "week target", value: `${scopeFruits.length}/${targetInRange(start, end)}` },
+        { label: "selected day", value: selectedPlant?.fruitIds.length ?? 0 },
+        { label: "best day", value: bestDay(scopePlants) },
+        { label: "top variety", value: topCategory(scopeFruits) },
+      ];
+    }
+
+    if (viewMode === "month") {
+      const start = startOfMonth(selected);
+      const end = endOfMonth(selected);
+      const scopePlants = plantsInRange(start, end);
+      const scopeFruits = fruitsForPlants(scopePlants);
+
+      return [
+        { label: "month target", value: `${scopeFruits.length}/${targetInRange(start, end)}` },
+        { label: "active days", value: scopePlants.length },
+        { label: "best day", value: bestDay(scopePlants) },
+        { label: "top variety", value: topCategory(scopeFruits) },
+      ];
+    }
+
+    const yearStart = new Date(selected.getFullYear(), 0, 1);
+    const yearEnd = new Date(selected.getFullYear(), 11, 31);
+    const scopePlants = plantsInRange(yearStart, yearEnd);
+    const scopeFruits = fruitsForPlants(scopePlants);
+
+    return [
+      { label: "year effort", value: scopeFruits.length },
+      { label: "active days", value: scopePlants.length },
+      { label: "best month", value: bestMonth() },
+      { label: "top variety", value: topCategory(scopeFruits) },
+    ];
+  }, [categories, dailyGoals, fruits, plants, selectedDate, viewMode]);
 
   return (
     <section className="yard-workspace">
@@ -818,7 +1274,7 @@ function YardWorkspace({
             viewMode={viewMode}
           />
         </div>
-        <AmbientStats {...stats} />
+        <AmbientStats items={stats} />
       </div>
     </section>
   );
@@ -828,6 +1284,7 @@ function FocusMode({
   nextTask,
   categories,
   fruits,
+  dailyGoals,
   plants,
   highlightedCategoryId,
   selectedDate,
@@ -838,12 +1295,14 @@ function FocusMode({
   pauseTimer,
   resumeTimer,
   abandonTimer,
-  completeActiveTimer,
   moveFruitAnchor,
+  setDailyGoal,
+  collapseFocus,
 }: {
   nextTask?: Task;
   categories: Category[];
   fruits: TomatoFruit[];
+  dailyGoals: DailyGoalSettings;
   plants: ReturnType<typeof useDayseedStore.getState>["dailyPlants"];
   highlightedCategoryId?: string;
   selectedDate: string;
@@ -854,36 +1313,60 @@ function FocusMode({
   pauseTimer: () => void;
   resumeTimer: () => void;
   abandonTimer: () => void;
-  completeActiveTimer: () => void;
   moveFruitAnchor: (fruitId: string, anchorIndex: number) => void;
+  setDailyGoal: (date: string, goal: number, scope: "today" | "future") => void;
+  collapseFocus: () => void;
 }) {
-  const progress = activeTimer
-    ? 1 - remaining / activeTimer.plannedDurationSec
-    : 0;
-
   return (
     <section className="focus-mode">
-      <div className="focus-progress" aria-label="Session progress">
-        <span style={{ height: `${Math.max(4, progress * 100)}%` }} />
+      <button
+        aria-label="Restore list panel"
+        className="focus-collapsed-rail"
+        onClick={collapseFocus}
+        type="button"
+      >
+        <Inbox size={16} strokeWidth={1.7} />
+        <span>Lists hidden</span>
+      </button>
+      <button
+        aria-label="Restore task panel"
+        className="focus-collapsed-rail"
+        onClick={collapseFocus}
+        type="button"
+      >
+        <ListChecks size={16} strokeWidth={1.7} />
+        <span>Tasks hidden</span>
+      </button>
+      <div className="focus-stage">
+        <button
+          aria-label="Collapse focus view"
+          className="garden-collapse-button"
+          onClick={collapseFocus}
+          title="Collapse focus view"
+          type="button"
+        >
+          <PanelLeftClose size={18} strokeWidth={1.7} />
+        </button>
+        <NextTaskPreview
+          abandonTimer={abandonTimer}
+          activeTimer={activeTimer}
+          categories={categories}
+          dailyGoals={dailyGoals}
+          expanded
+          fruits={fruits}
+          highlightedCategoryId={highlightedCategoryId}
+          moveFruitAnchor={moveFruitAnchor}
+          nextTask={nextTask}
+          pauseTimer={pauseTimer}
+          plants={plants}
+          remaining={remaining}
+          resumeTimer={resumeTimer}
+          selectedDate={selectedDate}
+          setDailyGoal={setDailyGoal}
+          setSelectedCategory={setSelectedCategory}
+          startTimer={startTimer}
+        />
       </div>
-      <NextTaskPreview
-        abandonTimer={abandonTimer}
-        activeTimer={activeTimer}
-        categories={categories}
-        completeActiveTimer={completeActiveTimer}
-        expanded
-        fruits={fruits}
-        highlightedCategoryId={highlightedCategoryId}
-        moveFruitAnchor={moveFruitAnchor}
-        nextTask={nextTask}
-        pauseTimer={pauseTimer}
-        plants={plants}
-        remaining={remaining}
-        resumeTimer={resumeTimer}
-        selectedDate={selectedDate}
-        setSelectedCategory={setSelectedCategory}
-        startTimer={startTimer}
-      />
     </section>
   );
 }
@@ -896,6 +1379,8 @@ export function DayseedApp() {
   const sessions = useDayseedStore((state) => state.sessions);
   const plants = useDayseedStore((state) => state.dailyPlants);
   const fruits = useDayseedStore((state) => state.fruits);
+  const userProfile = useDayseedStore((state) => state.userProfile);
+  const dailyGoals = useDayseedStore((state) => state.dailyGoals);
   const selectedTaskId = useDayseedStore((state) => state.selectedTaskId);
   const selectedCategoryId = useDayseedStore((state) => state.selectedCategoryId);
   const selectedDate = useDayseedStore((state) => state.selectedDate);
@@ -915,7 +1400,10 @@ export function DayseedApp() {
   const abandonTimer = useDayseedStore((state) => state.abandonTimer);
   const completeActiveTimer = useDayseedStore((state) => state.completeActiveTimer);
   const moveFruitAnchor = useDayseedStore((state) => state.moveFruitAnchor);
+  const setDailyGoal = useDayseedStore((state) => state.setDailyGoal);
+  const updateUserProfile = useDayseedStore((state) => state.updateUserProfile);
   const [section, setSection] = useState<AppSection>("tasks");
+  const [focusExpanded, setFocusExpanded] = useState(true);
   const now = useClock(activeTimer?.id);
   const remaining = remainingSeconds(activeTimer, now);
 
@@ -932,31 +1420,10 @@ export function DayseedApp() {
   const activeTasks = tasks.filter((task) => task.status === "active");
   const nextTask =
     activeTasks.find((task) => task.id === selectedTaskId) ?? activeTasks[0] ?? undefined;
-  const stats = useMemo(() => {
-    const today = dateKey();
-    const weekStart = startOfWeek(new Date(), { weekStartsOn: 1 });
-    const weekEnd = endOfWeek(new Date(), { weekStartsOn: 1 });
-    const completedSessions = sessions.filter(
-      (session) => session.status === "completed" && session.completedAt,
-    );
-    const weekCount = completedSessions.filter((session) =>
-      isWithinInterval(parseISO(session.completedAt ?? ""), { start: weekStart, end: weekEnd }),
-    ).length;
-
-    return {
-      todayCount: completedSessions.filter((session) =>
-        session.completedAt ? dateKey(parseISO(session.completedAt)) === today : false,
-      ).length,
-      weekCount,
-      monthPlantedDays: plants.filter(
-        (plant) => plant.fruitIds.length > 0 && sameMonth(plant.date, selectedDate),
-      ).length,
-      yearPlantedDays: plants.filter(
-        (plant) => plant.fruitIds.length > 0 && sameYear(plant.date, selectedDate),
-      ).length,
-    };
-  }, [plants, selectedDate, sessions]);
-
+  const startFocusTimer = () => {
+    startTimer();
+    setFocusExpanded(true);
+  };
   if (!hydrated) {
     return (
       <main className="app-shell is-loading">
@@ -970,13 +1437,31 @@ export function DayseedApp() {
 
   return (
     <main className={`app-shell ${activeTimer ? "is-focus" : ""}`}>
-      <AppHeader section={section} setSection={setSection} />
-      {activeTimer ? (
+      <AppHeader
+        section={section}
+        setSection={setSection}
+        updateUserProfile={updateUserProfile}
+        userProfile={userProfile}
+      />
+      {section === "yard" ? (
+        <YardWorkspace
+          categories={categories}
+          dailyGoals={dailyGoals}
+          fruits={fruits}
+          highlightedCategoryId={highlightedCategoryId}
+          plants={plants}
+          selectedDate={selectedDate}
+          setHighlightedCategory={setHighlightedCategory}
+          setSelectedDate={setSelectedDate}
+          setViewMode={setViewMode}
+        />
+      ) : activeTimer && focusExpanded ? (
         <FocusMode
           abandonTimer={abandonTimer}
           activeTimer={activeTimer}
           categories={categories}
-          completeActiveTimer={completeActiveTimer}
+          collapseFocus={() => setFocusExpanded(false)}
+          dailyGoals={dailyGoals}
           fruits={fruits}
           highlightedCategoryId={highlightedCategoryId}
           moveFruitAnchor={moveFruitAnchor}
@@ -986,20 +1471,9 @@ export function DayseedApp() {
           remaining={remaining}
           resumeTimer={resumeTimer}
           selectedDate={dateKey()}
+          setDailyGoal={setDailyGoal}
           setSelectedCategory={setSelectedCategory}
-          startTimer={startTimer}
-        />
-      ) : section === "yard" ? (
-        <YardWorkspace
-          categories={categories}
-          fruits={fruits}
-          highlightedCategoryId={highlightedCategoryId}
-          plants={plants}
-          selectedDate={selectedDate}
-          setHighlightedCategory={setHighlightedCategory}
-          setSelectedDate={setSelectedDate}
-          setViewMode={setViewMode}
-          stats={stats}
+          startTimer={startFocusTimer}
         />
       ) : (
         <TasksWorkbench
@@ -1008,7 +1482,7 @@ export function DayseedApp() {
           addTask={addTask}
           archiveTask={archiveTask}
           categories={categories}
-          completeActiveTimer={completeActiveTimer}
+          dailyGoals={dailyGoals}
           editTask={editTask}
           fruits={fruits}
           highlightedCategoryId={highlightedCategoryId}
@@ -1022,8 +1496,9 @@ export function DayseedApp() {
           selectedDate={dateKey()}
           selectedTaskId={selectedTaskId}
           sessions={sessions}
+          setDailyGoal={setDailyGoal}
           setSelectedCategory={setSelectedCategory}
-          startTimer={startTimer}
+          startTimer={startFocusTimer}
           tasks={tasks}
         />
       )}

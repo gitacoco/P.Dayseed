@@ -41,8 +41,15 @@ async function verifyViewport(browser, name, viewport) {
   if (!focusVisible) {
     throw new Error(`${name}: expected focus mode after starting a task`);
   }
-  await page.getByRole("button", { name: "Plant" }).click();
-  await page.waitForTimeout(450);
+  await page.getByRole("button", { name: "Pause" }).click();
+  await page.waitForTimeout(250);
+  const disclosedControls = await Promise.all([
+    page.getByRole("button", { name: "Resume" }).isVisible(),
+    page.getByRole("button", { name: "Stop" }).isVisible(),
+  ]);
+  if (!disclosedControls.every(Boolean)) {
+    throw new Error(`${name}: expected paused timer to disclose Resume and Stop controls`);
+  }
 
   await page.getByRole("button", { name: "Yard" }).click();
   await page.waitForTimeout(250);
@@ -52,8 +59,8 @@ async function verifyViewport(browser, name, viewport) {
   await page.waitForTimeout(250);
 
   const stats = await page.locator('section[aria-label="Garden stats"] strong').allTextContents();
-  if (stats[0] !== "1") {
-    throw new Error(`${name}: expected today stat to be 1, got ${stats[0]}`);
+  if (stats.length !== 4 || stats.some((value) => value.trim().length === 0)) {
+    throw new Error(`${name}: expected four contextual yard stats, got ${JSON.stringify(stats)}`);
   }
 
   const path = new URL(`dayseed-${name}.png`, outDir).pathname;

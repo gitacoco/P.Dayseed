@@ -13,11 +13,25 @@ import type {
   Task,
   TomatoFruit,
   TomatoVariant,
+  UserProfile,
 } from "@/types/dayseed";
 
 const DEFAULT_DURATION_SEC = 25 * 60;
 const TOMATO_ANCHOR_SLOT_COUNT = 15;
 const TOMATO_ANCHOR_DEFAULT_ORDER = [0, 5, 10, 1, 6, 11, 2, 7, 12, 3, 8, 13, 4, 9, 14];
+const DEFAULT_DAILY_GOAL = 15;
+const DEFAULT_USER_PROFILE: UserProfile = {
+  avatarColor: "#003c33",
+  displayName: "Nora",
+};
+
+export type TaskInput = {
+  title: string;
+  categoryIds?: string[];
+  estimatedPomodoros?: number;
+  scheduledDate?: string;
+  notes?: string;
+};
 
 const VARIANT_COLORS: Record<TomatoVariant, string> = {
   red: "#d84d32",
@@ -56,10 +70,10 @@ export const DEFAULT_CATEGORIES: Category[] = [
 
 type DayseedActions = {
   hydrate: () => Promise<void>;
-  addTask: (title: string, categoryIds: string[]) => void;
+  addTask: (input: TaskInput) => void;
   editTask: (
     taskId: string,
-    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros">>,
+    patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros" | "scheduledDate" | "notes">>,
   ) => void;
   archiveTask: (taskId: string) => void;
   selectTask: (taskId: string) => void;
@@ -75,10 +89,14 @@ type DayseedActions = {
   abandonTimer: () => void;
   completeActiveTimer: () => void;
   moveFruitAnchor: (fruitId: string, anchorIndex: number) => void;
+  setDailyGoal: (date: string, goal: number, scope: "today" | "future") => void;
+  setWhiteNoisePlaying: (playing: boolean) => void;
+  updateUserProfile: (patch: Partial<UserProfile>) => void;
 };
 
 export type DayseedStore = DayseedSnapshot & {
   hydrated: boolean;
+  whiteNoisePlaying: boolean;
 } & DayseedActions;
 
 function createSnapshot(): DayseedSnapshot {
@@ -88,8 +106,13 @@ function createSnapshot(): DayseedSnapshot {
     sessions: [],
     dailyPlants: [],
     fruits: [],
+    dailyGoals: {
+      defaultGoal: DEFAULT_DAILY_GOAL,
+      overrides: {},
+    },
     selectedCategoryId: DEFAULT_CATEGORIES[0].id,
     selectedDate: dateKey(),
+    userProfile: DEFAULT_USER_PROFILE,
     viewMode: "today",
   };
 }
@@ -101,10 +124,12 @@ function snapshotFromState(state: DayseedStore): DayseedSnapshot {
     sessions: state.sessions,
     dailyPlants: state.dailyPlants,
     fruits: state.fruits,
+    dailyGoals: state.dailyGoals,
     activeTimer: state.activeTimer,
     selectedTaskId: state.selectedTaskId,
     selectedCategoryId: state.selectedCategoryId,
     selectedDate: state.selectedDate,
+    userProfile: state.userProfile,
     viewMode: state.viewMode,
     highlightedCategoryId: state.highlightedCategoryId,
   };
@@ -118,21 +143,36 @@ function persist(state: DayseedStore) {
   void saveDayseedSnapshot(snapshotFromState(state));
 }
 
-function withCategoryDefaults(snapshot: DayseedSnapshot): DayseedSnapshot {
-  const categoryIds = new Set(snapshot.categories.map((category) => category.id));
+function withSnapshotDefaults(snapshot: Partial<DayseedSnapshot>): DayseedSnapshot {
+  const categories = snapshot.categories ?? DEFAULT_CATEGORIES;
+  const categoryIds = new Set(categories.map((category) => category.id));
   const missingDefaults = DEFAULT_CATEGORIES.filter((category) => !categoryIds.has(category.id));
-  const categories = [...snapshot.categories, ...missingDefaults];
+  const mergedCategories = [...categories, ...missingDefaults];
   const selectedCategoryId =
-    snapshot.selectedCategoryId && categories.some((item) => item.id === snapshot.selectedCategoryId)
+    snapshot.selectedCategoryId && mergedCategories.some((item) => item.id === snapshot.selectedCategoryId)
       ? snapshot.selectedCategoryId
-      : categories[0]?.id;
+      : mergedCategories[0]?.id;
 
   return {
-    ...snapshot,
-    categories,
+    tasks: snapshot.tasks ?? [],
+    categories: mergedCategories,
+    sessions: snapshot.sessions ?? [],
+    dailyPlants: snapshot.dailyPlants ?? [],
+    fruits: snapshot.fruits ?? [],
+    activeTimer: snapshot.activeTimer,
+    selectedTaskId: snapshot.selectedTaskId,
     selectedCategoryId,
+    highlightedCategoryId: snapshot.highlightedCategoryId,
+    dailyGoals: {
+      defaultGoal: Math.max(1, Math.round(snapshot.dailyGoals?.defaultGoal ?? DEFAULT_DAILY_GOAL)),
+      overrides: snapshot.dailyGoals?.overrides ?? {},
+    },
     selectedDate: snapshot.selectedDate || dateKey(),
-      viewMode: snapshot.viewMode || "today",
+    userProfile: {
+      ...DEFAULT_USER_PROFILE,
+      ...snapshot.userProfile,
+    },
+    viewMode: snapshot.viewMode || "today",
   };
 }
 
@@ -159,10 +199,11 @@ function categoryForFruit(categories: Category[], categoryId: string) {
 export const useDayseedStore = create<DayseedStore>()((set, get) => ({
   ...createSnapshot(),
   hydrated: false,
+  whiteNoisePlaying: false,
 
   hydrate: async () => {
     const stored = await loadDayseedSnapshot();
-    const snapshot = withCategoryDefaults(stored ?? createSnapshot());
+    const snapshot = withSnapshotDefaults(stored ?? createSnapshot());
 
     set({
       ...snapshot,
@@ -170,19 +211,24 @@ export const useDayseedStore = create<DayseedStore>()((set, get) => ({
     });
   },
 
-  addTask: (title, categoryIds) => {
-    const trimmed = title.trim();
+  addTask: (input) => {
+    const trimmed = input.title.trim();
     if (!trimmed) {
       return;
     }
 
     const now = new Date().toISOString();
     const fallbackCategoryId = get().selectedCategoryId ?? get().categories[0]?.id;
+    const categoryIds = input.categoryIds ?? [];
+    const scheduledDate = input.scheduledDate?.trim();
+    const notes = input.notes?.trim();
     const nextTask: Task = {
       id: createId("task"),
       title: trimmed,
       categoryIds: categoryIds.length > 0 ? categoryIds : fallbackCategoryId ? [fallbackCategoryId] : [],
-      estimatedPomodoros: 1,
+      estimatedPomodoros: Math.max(0, Math.round(input.estimatedPomodoros ?? 1)),
+      notes: notes || undefined,
+      scheduledDate: scheduledDate || undefined,
       status: "active",
       createdAt: now,
     };
@@ -203,6 +249,9 @@ export const useDayseedStore = create<DayseedStore>()((set, get) => ({
               title: patch.title ?? task.title,
               categoryIds: patch.categoryIds ?? task.categoryIds,
               estimatedPomodoros: patch.estimatedPomodoros ?? task.estimatedPomodoros,
+              notes: patch.notes !== undefined ? patch.notes.trim() || undefined : task.notes,
+              scheduledDate:
+                patch.scheduledDate !== undefined ? patch.scheduledDate || undefined : task.scheduledDate,
             }
           : task,
       ),
@@ -497,6 +546,51 @@ export const useDayseedStore = create<DayseedStore>()((set, get) => ({
 
         return { ...fruit, anchorIndex: normalizedAnchorIndex };
       }),
+    }));
+    persist(get());
+  },
+
+  setDailyGoal: (date, goal, scope) => {
+    const normalizedGoal = Math.max(1, Math.min(99, Math.round(goal)));
+
+    set((state) => {
+      if (scope === "future") {
+        const overrides = Object.fromEntries(
+          Object.entries(state.dailyGoals.overrides).filter(([key]) => key < date),
+        );
+
+        return {
+          dailyGoals: {
+            defaultGoal: normalizedGoal,
+            overrides,
+          },
+        };
+      }
+
+      return {
+        dailyGoals: {
+          ...state.dailyGoals,
+          overrides: {
+            ...state.dailyGoals.overrides,
+            [date]: normalizedGoal,
+          },
+        },
+      };
+    });
+    persist(get());
+  },
+
+  setWhiteNoisePlaying: (whiteNoisePlaying) => {
+    set({ whiteNoisePlaying });
+  },
+
+  updateUserProfile: (patch) => {
+    set((state) => ({
+      userProfile: {
+        ...state.userProfile,
+        ...patch,
+        displayName: patch.displayName !== undefined ? patch.displayName.trim() || "Nora" : state.userProfile.displayName,
+      },
     }));
     persist(get());
   },
