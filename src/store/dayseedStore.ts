@@ -33,13 +33,23 @@ export type TaskInput = {
   notes?: string;
 };
 
-const VARIANT_COLORS: Record<TomatoVariant, string> = {
-  red: "#d84d32",
-  yellow: "#e0b33a",
-  green: "#71974b",
-  purple: "#7a4b77",
-  striped: "#c96f3f",
-};
+export const TOMATO_VARIANT_OPTIONS: { variant: TomatoVariant; label: string; color: string }[] = [
+  { variant: "red", label: "Red", color: "#d84d32" },
+  { variant: "yellow", label: "Gold", color: "#e0b33a" },
+  { variant: "green", label: "Green", color: "#71974b" },
+  { variant: "purple", label: "Purple", color: "#7a4b77" },
+  { variant: "striped", label: "Striped", color: "#c96f3f" },
+];
+
+const VARIANT_COLORS: Record<TomatoVariant, string> = Object.fromEntries(
+  TOMATO_VARIANT_OPTIONS.map((option) => [option.variant, option.color]),
+) as Record<TomatoVariant, string>;
+
+const VARIANT_IDS = new Set<TomatoVariant>(TOMATO_VARIANT_OPTIONS.map((option) => option.variant));
+
+const FALLBACK_VARIANT: TomatoVariant = "red";
+
+const FALLBACK_COLOR = VARIANT_COLORS[FALLBACK_VARIANT];
 
 export const DEFAULT_CATEGORIES: Category[] = [
   {
@@ -68,6 +78,67 @@ export const DEFAULT_CATEGORIES: Category[] = [
   },
 ];
 
+function localIsoForDate(date: string, hour: number, minute = 0) {
+  return new Date(`${date}T${hour.toString().padStart(2, "0")}:${minute
+    .toString()
+    .padStart(2, "0")}:00`).toISOString();
+}
+
+function createSampleTodayEntries(today: string) {
+  const category = DEFAULT_CATEGORIES[0];
+  const taskId = `task_sample_${today}`;
+  const plantId = `plant_sample_${today}`;
+  const completedTimes = [
+    {
+      completedAt: localIsoForDate(today, 9, 25),
+      expectedEndAt: localIsoForDate(today, 9, 25),
+      id: `session_sample_${today}_1`,
+      startedAt: localIsoForDate(today, 9),
+    },
+    {
+      completedAt: localIsoForDate(today, 9, 55),
+      expectedEndAt: localIsoForDate(today, 9, 55),
+      id: `session_sample_${today}_2`,
+      startedAt: localIsoForDate(today, 9, 30),
+    },
+  ];
+  const sessions: PomodoroSession[] = completedTimes.map((session) => ({
+    ...session,
+    categoryIds: [category.id],
+    plannedDurationSec: DEFAULT_DURATION_SEC,
+    status: "completed",
+    taskId,
+  }));
+  const fruits: TomatoFruit[] = sessions.map((session, index) => ({
+    id: `fruit_sample_${today}_${index + 1}`,
+    dailyPlantId: plantId,
+    pomodoroSessionId: session.id,
+    categoryId: category.id,
+    variant: category.tomatoVariant,
+    anchorIndex: TOMATO_ANCHOR_DEFAULT_ORDER[index] ?? index,
+    createdAt: session.completedAt ?? session.expectedEndAt,
+  }));
+  const task: Task = {
+    id: taskId,
+    title: "sample task",
+    categoryIds: [category.id],
+    estimatedPomodoros: 2,
+    scheduledDate: today,
+    status: "active",
+    createdAt: localIsoForDate(today, 8, 45),
+  };
+  const dailyPlant: DailyPlant = {
+    id: plantId,
+    date: today,
+    growthStage: growthStageForCount(fruits.length),
+    fruitIds: fruits.map((fruit) => fruit.id),
+    plantedAt: fruits[0]?.createdAt,
+    seed: seededNumber(today),
+  };
+
+  return { dailyPlant, fruits, sessions, task };
+}
+
 type DayseedActions = {
   hydrate: () => Promise<void>;
   addTask: (input: TaskInput) => void;
@@ -78,7 +149,8 @@ type DayseedActions = {
   archiveTask: (taskId: string) => void;
   selectTask: (taskId: string) => void;
   toggleTaskCategory: (taskId: string, categoryId: string) => void;
-  addCategory: (name: string, variant: TomatoVariant) => void;
+  addCategory: (name: string, variant: TomatoVariant) => string | undefined;
+  editCategory: (categoryId: string, patch: Partial<Pick<Category, "name" | "tomatoVariant">>) => void;
   setSelectedCategory: (categoryId: string) => void;
   setHighlightedCategory: (categoryId?: string) => void;
   setViewMode: (viewMode: GardenViewMode) => void;
@@ -100,18 +172,22 @@ export type DayseedStore = DayseedSnapshot & {
 } & DayseedActions;
 
 function createSnapshot(): DayseedSnapshot {
+  const today = dateKey();
+  const sampleToday = createSampleTodayEntries(today);
+
   return {
-    tasks: [],
+    tasks: [sampleToday.task],
     categories: DEFAULT_CATEGORIES,
-    sessions: [],
-    dailyPlants: [],
-    fruits: [],
+    sessions: sampleToday.sessions,
+    dailyPlants: [sampleToday.dailyPlant],
+    fruits: sampleToday.fruits,
     dailyGoals: {
       defaultGoal: DEFAULT_DAILY_GOAL,
       overrides: {},
     },
+    selectedTaskId: sampleToday.task.id,
     selectedCategoryId: DEFAULT_CATEGORIES[0].id,
-    selectedDate: dateKey(),
+    selectedDate: today,
     userProfile: DEFAULT_USER_PROFILE,
     viewMode: "today",
   };
@@ -143,8 +219,19 @@ function persist(state: DayseedStore) {
   void saveDayseedSnapshot(snapshotFromState(state));
 }
 
+function normalizeCategory(category: Category): Category {
+  const variant = VARIANT_IDS.has(category.tomatoVariant) ? category.tomatoVariant : FALLBACK_VARIANT;
+
+  return {
+    ...category,
+    name: category.name?.trim() || "Category",
+    tomatoVariant: variant,
+    color: VARIANT_COLORS[variant] ?? category.color ?? FALLBACK_COLOR,
+  };
+}
+
 function withSnapshotDefaults(snapshot: Partial<DayseedSnapshot>): DayseedSnapshot {
-  const categories = snapshot.categories ?? DEFAULT_CATEGORIES;
+  const categories = (snapshot.categories ?? DEFAULT_CATEGORIES).map(normalizeCategory);
   const categoryIds = new Set(categories.map((category) => category.id));
   const missingDefaults = DEFAULT_CATEGORIES.filter((category) => !categoryIds.has(category.id));
   const mergedCategories = [...categories, ...missingDefaults];
@@ -313,19 +400,45 @@ export const useDayseedStore = create<DayseedStore>()((set, get) => ({
   addCategory: (name, variant) => {
     const trimmed = name.trim();
     if (!trimmed) {
-      return;
+      return undefined;
     }
+    const safeVariant = VARIANT_IDS.has(variant) ? variant : FALLBACK_VARIANT;
 
     const category: Category = {
       id: createId("cat"),
       name: trimmed,
-      tomatoVariant: variant,
-      color: VARIANT_COLORS[variant],
+      tomatoVariant: safeVariant,
+      color: VARIANT_COLORS[safeVariant],
     };
 
     set((state) => ({
       categories: [...state.categories, category],
       selectedCategoryId: category.id,
+    }));
+    persist(get());
+    return category.id;
+  },
+
+  editCategory: (categoryId, patch) => {
+    set((state) => ({
+      categories: state.categories.map((category) => {
+        if (category.id !== categoryId) {
+          return category;
+        }
+
+        const nextName = patch.name !== undefined ? patch.name.trim() : category.name;
+        const nextVariant =
+          patch.tomatoVariant && VARIANT_IDS.has(patch.tomatoVariant)
+            ? patch.tomatoVariant
+            : category.tomatoVariant;
+
+        return {
+          ...category,
+          name: nextName || category.name,
+          tomatoVariant: nextVariant,
+          color: VARIANT_COLORS[nextVariant] ?? category.color,
+        };
+      }),
     }));
     persist(get());
   },

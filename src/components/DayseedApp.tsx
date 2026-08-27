@@ -20,6 +20,7 @@ import {
   Upload,
   Volume2,
   VolumeX,
+  X,
 } from "lucide-react";
 import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { endOfMonth, endOfWeek, format, isSameDay, isWithinInterval, parseISO, startOfMonth, startOfWeek } from "date-fns";
@@ -27,7 +28,7 @@ import { GardenCanvas } from "@/components/GardenCanvas";
 import { TomatoTree3D } from "@/components/TomatoTree3D";
 import { dateKey, monthTitle, yearTitle } from "@/lib/dates";
 import { formatRemaining, remainingSeconds } from "@/lib/timer";
-import { useDayseedStore, type TaskInput } from "@/store/dayseedStore";
+import { TOMATO_VARIANT_OPTIONS, useDayseedStore, type TaskInput } from "@/store/dayseedStore";
 import type {
   Category,
   DailyGoalSettings,
@@ -36,6 +37,7 @@ import type {
   PomodoroSession,
   Task,
   TomatoFruit,
+  TomatoVariant,
   UserProfile,
 } from "@/types/dayseed";
 
@@ -58,6 +60,7 @@ const YARD_SCALES: { id: YardScale; label: string; viewMode: GardenViewMode }[] 
 ];
 
 const AVATAR_COLORS = ["#003c33", "#6f8c62", "#d84d32", "#7a4b77", "#2f5f88"];
+const DEFAULT_NEW_CATEGORY_NAME = "New category";
 
 function firstInitial(name: string) {
   return name.trim().charAt(0).toUpperCase() || "N";
@@ -389,16 +392,227 @@ function TaskFilterRail({
   );
 }
 
+type CategoryPatch = Partial<Pick<Category, "name" | "tomatoVariant">>;
+
+function CategoryEditor({
+  categoryId,
+  categories,
+  setCategoryId,
+  addCategory,
+  editCategory,
+}: {
+  categoryId: string;
+  categories: Category[];
+  setCategoryId: (categoryId: string) => void;
+  addCategory: (name: string, variant: TomatoVariant) => string | undefined;
+  editCategory: (categoryId: string, patch: CategoryPatch) => void;
+}) {
+  const selectedCategory = categories.find((category) => category.id === categoryId) ?? categories[0];
+  const labelInputRef = useRef<HTMLInputElement>(null);
+  const newCategoryInputRef = useRef<HTMLInputElement>(null);
+  const [newCategoryOpen, setNewCategoryOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [newCategoryVariant, setNewCategoryVariant] = useState<TomatoVariant>("red");
+
+  useEffect(() => {
+    if (!newCategoryOpen) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => newCategoryInputRef.current?.focus());
+  }, [newCategoryOpen]);
+
+  const commitLabel = (nextLabel: string) => {
+    if (!selectedCategory) {
+      return;
+    }
+
+    const trimmed = nextLabel.trim();
+    if (!trimmed) {
+      if (labelInputRef.current) {
+        labelInputRef.current.value = selectedCategory.name;
+      }
+      return;
+    }
+
+    if (trimmed !== selectedCategory.name) {
+      editCategory(selectedCategory.id, { name: trimmed });
+    }
+  };
+  const handleLabelKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitLabel(event.currentTarget.value);
+      event.currentTarget.blur();
+    }
+
+    if (event.key === "Escape") {
+      event.currentTarget.value = selectedCategory?.name ?? "";
+      event.currentTarget.blur();
+    }
+  };
+  const openNewCategoryDialog = () => {
+    setNewCategoryName("");
+    setNewCategoryVariant(selectedCategory?.tomatoVariant ?? "red");
+    setNewCategoryOpen(true);
+  };
+  const closeNewCategoryDialog = () => {
+    setNewCategoryOpen(false);
+  };
+  const createCategory = () => {
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) {
+      newCategoryInputRef.current?.focus();
+      return;
+    }
+
+    const nextCategoryId = addCategory(trimmed, newCategoryVariant);
+    if (nextCategoryId) {
+      setCategoryId(nextCategoryId);
+    }
+    closeNewCategoryDialog();
+  };
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeNewCategoryDialog();
+    }
+  };
+
+  return (
+    <div className="category-editor">
+      <label className="field-label">
+        <span>Category</span>
+        <select
+          aria-label="Task category"
+          onChange={(event) => setCategoryId(event.target.value)}
+          value={selectedCategory?.id ?? ""}
+        >
+          {categories.map((category) => (
+            <option key={category.id} value={category.id}>
+              {category.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field-label">
+        <span>Label</span>
+        <input
+          aria-label="Category label"
+          defaultValue={selectedCategory?.name ?? ""}
+          disabled={!selectedCategory}
+          key={`${selectedCategory?.id ?? "none"}-${selectedCategory?.name ?? ""}`}
+          onBlur={(event) => commitLabel(event.currentTarget.value)}
+          onKeyDown={handleLabelKeyDown}
+          ref={labelInputRef}
+        />
+      </label>
+      <div className="field-label category-variety-field">
+        <span>Tomato</span>
+        <div className="variant-picker" aria-label="Tomato variety">
+          {TOMATO_VARIANT_OPTIONS.map((option) => (
+            <button
+              aria-label={`${option.label} tomato`}
+              className={selectedCategory?.tomatoVariant === option.variant ? "is-active" : ""}
+              disabled={!selectedCategory}
+              key={option.variant}
+              onClick={() => selectedCategory && editCategory(selectedCategory.id, { tomatoVariant: option.variant })}
+              style={{ "--swatch": option.color } as React.CSSProperties}
+              title={option.label}
+              type="button"
+            >
+              <TomatoMark color={option.color} small striped={option.variant === "striped"} />
+            </button>
+          ))}
+        </div>
+      </div>
+      <button aria-label="Add category" className="category-add-button" onClick={openNewCategoryDialog} type="button">
+        <Plus size={16} strokeWidth={1.6} />
+        <span>New</span>
+      </button>
+      {newCategoryOpen ? (
+        <div
+          aria-label="New category"
+          aria-modal="true"
+          className="category-dialog-backdrop"
+          onKeyDown={handleDialogKeyDown}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeNewCategoryDialog();
+            }
+          }}
+          role="dialog"
+        >
+          <div className="category-dialog" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="category-dialog-header">
+              <strong>New Category</strong>
+              <button aria-label="Close category dialog" onClick={closeNewCategoryDialog} type="button">
+                <X size={18} strokeWidth={1.6} />
+              </button>
+            </div>
+            <label className="field-label">
+              <span>Label</span>
+              <input
+                aria-label="New category label"
+                onChange={(event) => setNewCategoryName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    createCategory();
+                  }
+                }}
+                placeholder={DEFAULT_NEW_CATEGORY_NAME}
+                ref={newCategoryInputRef}
+                value={newCategoryName}
+              />
+            </label>
+            <div className="field-label">
+              <span>Tomato</span>
+              <div className="variant-picker is-dialog" aria-label="New category tomato variety">
+                {TOMATO_VARIANT_OPTIONS.map((option) => (
+                  <button
+                    aria-label={`${option.label} tomato`}
+                    className={newCategoryVariant === option.variant ? "is-active" : ""}
+                    key={option.variant}
+                    onClick={() => setNewCategoryVariant(option.variant)}
+                    style={{ "--swatch": option.color } as React.CSSProperties}
+                    title={option.label}
+                    type="button"
+                  >
+                    <TomatoMark color={option.color} small striped={option.variant === "striped"} />
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="category-dialog-actions">
+              <button onClick={closeNewCategoryDialog} type="button">
+                Cancel
+              </button>
+              <button className="is-primary" onClick={createCategory} type="button">
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TaskComposer({
   selectedCategoryId,
   activeFilter,
   categories,
   addTask,
+  addCategory,
+  editCategory,
 }: {
   selectedCategoryId?: string;
   activeFilter: TaskFilter;
   categories: Category[];
   addTask: (input: TaskInput) => void;
+  addCategory: (name: string, variant: TomatoVariant) => string | undefined;
+  editCategory: (categoryId: string, patch: CategoryPatch) => void;
 }) {
   const [title, setTitle] = useState("");
   const [scheduledDate, setScheduledDate] = useState(activeFilter === "today" ? dateKey() : "");
@@ -484,20 +698,13 @@ function TaskComposer({
         </label>
       </div>
       <div className="composer-details">
-        <label className="field-label">
-          <span>Category</span>
-          <select
-            aria-label="Task category"
-            onChange={(event) => setCategoryId(event.target.value)}
-            value={categoryId}
-          >
-            {categories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <CategoryEditor
+          addCategory={addCategory}
+          categories={categories}
+          categoryId={categoryId}
+          editCategory={editCategory}
+          setCategoryId={setCategoryId}
+        />
         <label className="field-label composer-notes">
           <span>Notes</span>
           <input
@@ -693,6 +900,8 @@ function TaskList({
   selectedTaskId,
   selectedCategoryId,
   addTask,
+  addCategory,
+  editCategory,
   editTask,
   archiveTask,
   selectTask,
@@ -707,6 +916,8 @@ function TaskList({
   selectedTaskId?: string;
   selectedCategoryId?: string;
   addTask: (input: TaskInput) => void;
+  addCategory: (name: string, variant: TomatoVariant) => string | undefined;
+  editCategory: (categoryId: string, patch: CategoryPatch) => void;
   editTask: (
     taskId: string,
     patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros" | "scheduledDate" | "notes">>,
@@ -727,8 +938,10 @@ function TaskList({
       </div>
       <TaskComposer
         activeFilter={activeFilter}
+        addCategory={addCategory}
         addTask={addTask}
         categories={categories}
+        editCategory={editCategory}
         key={activeFilter}
         selectedCategoryId={selectedCategoryId}
       />
@@ -950,6 +1163,8 @@ function TasksWorkbench({
   remaining,
   dailyGoals,
   addTask,
+  addCategory,
+  editCategory,
   editTask,
   archiveTask,
   selectTask,
@@ -974,6 +1189,8 @@ function TasksWorkbench({
   remaining: number;
   dailyGoals: DailyGoalSettings;
   addTask: (input: TaskInput) => void;
+  addCategory: (name: string, variant: TomatoVariant) => string | undefined;
+  editCategory: (categoryId: string, patch: CategoryPatch) => void;
   editTask: (
     taskId: string,
     patch: Partial<Pick<Task, "title" | "categoryIds" | "estimatedPomodoros" | "scheduledDate" | "notes">>,
@@ -1039,11 +1256,13 @@ function TasksWorkbench({
       <TaskFilterRail activeFilter={filter} counts={counts} setFilter={setFilter} />
       <div className="center-stack">
         <TaskList
+          addCategory={addCategory}
           addTask={addTask}
           activeFilter={filter}
           archiveTask={archiveTask}
           categories={categories}
           dateLabel={dateLabel}
+          editCategory={editCategory}
           editTask={editTask}
           fruits={fruits}
           selectTask={selectTask}
@@ -1387,6 +1606,8 @@ export function DayseedApp() {
   const highlightedCategoryId = useDayseedStore((state) => state.highlightedCategoryId);
   const activeTimer = useDayseedStore((state) => state.activeTimer);
   const addTask = useDayseedStore((state) => state.addTask);
+  const addCategory = useDayseedStore((state) => state.addCategory);
+  const editCategory = useDayseedStore((state) => state.editCategory);
   const editTask = useDayseedStore((state) => state.editTask);
   const archiveTask = useDayseedStore((state) => state.archiveTask);
   const selectTask = useDayseedStore((state) => state.selectTask);
@@ -1479,10 +1700,12 @@ export function DayseedApp() {
         <TasksWorkbench
           abandonTimer={abandonTimer}
           activeTimer={activeTimer}
+          addCategory={addCategory}
           addTask={addTask}
           archiveTask={archiveTask}
           categories={categories}
           dailyGoals={dailyGoals}
+          editCategory={editCategory}
           editTask={editTask}
           fruits={fruits}
           highlightedCategoryId={highlightedCategoryId}
